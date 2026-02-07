@@ -18,3 +18,9 @@ for i, it in enumerate(filtered[:100]):
                 ...
         with cols[1]:
             run = st.button("AI分析", key=f"ai_{uid}", disabled=not can_run_ai)
+import re
+
+_KESSAN_RE = re.compile(r"(決算短信|四半期決算|通期決算|Financial Results|Earnings)", re.IGNORECASE)
+
+def is_kessan(title: str) -> bool:
+    return bool(_KESSAN_RE.search(title or ""))
