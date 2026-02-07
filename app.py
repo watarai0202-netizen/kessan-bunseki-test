@@ -373,11 +373,17 @@ for gi, gk in enumerate(group_keys[:show_n_groups]):
 
             st.markdown(f"---\n**[{tag}] {title}**  \n`{published_str}`  \nコード: {code4}({code_raw})")
 
-            if doc_url:
-                st.link_button("PDFを開く", doc_url, key=f"open_{uid}")
-                st.caption(f"PDF: {doc_url}")
-            else:
-                st.caption("PDF: （なし）")
+            doc_url = (doc_url or "").strip()
+
+           if doc_url.startswith("http"):
+           st.markdown(f"[PDFを開く]({doc_url})")
+           st.caption(f"PDF: {doc_url}")
+           elif doc_url:
+           st.warning("PDF URLが不正形式のためリンクを出せません。")
+           st.code(doc_url)
+           else:
+        st.caption("PDF: （なし）")
+
 
             # キャッシュ表示
             cached = get_cached_analysis(DB_PATH, doc_url) if doc_url else None
