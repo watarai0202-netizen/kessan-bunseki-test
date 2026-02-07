@@ -5,10 +5,9 @@ from typing import Any
 
 import requests
 
-# 非スクレイピングのJSONインデックス（やのしん TDnet WEB-API）
 TDNET_BASE = "https://webapi.yanoshin.jp/webapi/tdnet/list"
 
-# TDnetの時刻が "2026-02-06 20:00:00" のようなJSTっぽいnaiveで来ることがあるので補正
+# "2026-02-06 20:00:00" みたいな naive が来たら JST 扱いにして UTC へ
 JST = timezone(timedelta(hours=9))
 
 
@@ -20,18 +19,27 @@ def _parse_dt_maybe(value: str | None) -> datetime | None:
     try:
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
-            # naiveはJST扱い → UTCへ
             dt = dt.replace(tzinfo=JST)
         return dt.astimezone(timezone.utc)
     except Exception:
         return None
 
 
+def _pick_tdnet_dict(raw: dict[str, Any]) -> dict[str, Any]:
+    """
+    APIレスポンスのキー揺れ対策：
+    - "TDnet" / "Tdnet" / "tdnet" のどれで来ても拾う
+    - どれも無ければ raw 自体を返す
+    """
+    for k in ("TDnet", "Tdnet", "tdnet"):
+        v = raw.get(k)
+        if isinstance(v, dict):
+            return v
+    return raw
+
+
 def _normalize_item(raw: dict[str, Any]) -> dict[str, Any]:
-    """
-    APIレスポンスの形が多少揺れても壊れないように、保守的に正規化する。
-    """
-    td = raw.get("TDnet") if isinstance(raw.get("TDnet"), dict) else raw
+    td = _pick_tdnet_dict(raw)
 
     title = td.get("title") or td.get("Title") or ""
     code = td.get("code") or td.get("Code") or ""
@@ -40,7 +48,7 @@ def _normalize_item(raw: dict[str, Any]) -> dict[str, Any]:
     company_code = td.get("company_code") or td.get("companyCode") or code or ""
     company_name = td.get("company_name") or td.get("companyName") or ""
 
-    # 4桁コードを作る（45230→5230 みたいに末尾4桁）
+    # 4桁コードを作る（例: 45230 → 5230）
     code4 = ""
     cc = str(company_code or "").strip()
     if cc.isdigit():
@@ -76,7 +84,7 @@ def _normalize_item(raw: dict[str, Any]) -> dict[str, Any]:
 
 def fetch_tdnet_items(code: str | None, limit: int = 200) -> list[dict[str, Any]]:
     """
-    code があれば銘柄別、なければrecent。
+    code があれば銘柄別、なければ recent。
     """
     if code and code.isdigit() and len(code) == 4:
         url = f"{TDNET_BASE}/{code}.json?limit={limit}"
