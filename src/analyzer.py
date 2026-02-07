@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
+from typing import Any, Dict
+from urllib.parse import urlparse
 
 import requests
 import streamlit as st
 from google import genai
+
+
+# ----------------------------
+# Strict security settings
+# ----------------------------
+MAX_PDF_BYTES_DEFAULT = 20 * 1024 * 1024  # 20MB
+ALLOWED_HOST_SUFFIXES = ("release.tdnet.info",)
 
 
 def ai_is_enabled() -> bool:
@@ -20,24 +30,136 @@ def _client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+def _is_allowed_pdf_url(url: str) -> bool:
+    try:
+        u = urlparse(url)
+        if u.scheme not in ("http", "https"):
+            return False
+        host = (u.hostname or "").lower()
+        if not host:
+            return False
+        if not any(host == s or host.endswith("." + s) for s in ALLOWED_HOST_SUFFIXES):
+            return False
+        if not u.path.lower().endswith(".pdf"):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _download_to_temp(url: str) -> str:
-    r = requests.get(url, timeout=30, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+    """
+    安全寄りにPDFをダウンロード:
+    - allowlist host
+    - Content-Type / 拡張子チェック
+    - サイズ上限
+    """
+    if not _is_allowed_pdf_url(url):
+        raise ValueError("許可されていないURLです（TDnet公式PDFのみ）")
+
+    max_bytes = int(st.secrets.get("MAX_PDF_BYTES", MAX_PDF_BYTES_DEFAULT))
+
+    # まずHEADでサイズを見る（サーバが対応しない場合もある）
+    try:
+        h = requests.head(url, timeout=15, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+        if h.ok:
+            cl = h.headers.get("Content-Length")
+            if cl and cl.isdigit() and int(cl) > max_bytes:
+                raise ValueError(f"PDFが大きすぎます（{int(cl)} bytes > {max_bytes} bytes）")
+    except requests.RequestException:
+        # HEAD失敗は無視（GETでチェック）
+        pass
+
+    r = requests.get(
+        url,
+        timeout=30,
+        allow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0"},
+        stream=True,
+    )
     r.raise_for_status()
 
     ctype = (r.headers.get("Content-Type") or "").lower()
-    # 厳密にはしないが、怪しい場合は弾く（HTMLを食わせる事故を減らす）
-    if ("pdf" not in ctype) and (not url.lower().endswith(".pdf")):
+    # ここも強めに（octet-streamがあるので完全には縛らないが、text/htmlは弾く）
+    if "text/html" in ctype:
         raise ValueError(f"PDFではない可能性があります: content-type={ctype}")
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    tmp.write(r.content)
+    size = 0
+    for chunk in r.iter_content(chunk_size=1024 * 256):
+        if not chunk:
+            continue
+        size += len(chunk)
+        if size > max_bytes:
+            tmp.close()
+            try:
+                os.remove(tmp.name)
+            except Exception:
+                pass
+            raise ValueError(f"PDFが大きすぎます（>{max_bytes} bytes）。")
+        tmp.write(chunk)
+
     tmp.close()
     return tmp.name
 
 
+# ----------------------------
+# JSON extraction helpers
+# ----------------------------
+def _strip_code_fences(text: str) -> str:
+    t = text.strip()
+    # ```json ... ```
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z0-9]*\s*", "", t)
+        t = re.sub(r"\s*```$", "", t)
+    return t.strip()
+
+
+def _extract_first_json_object(text: str) -> str:
+    """
+    文章が混ざっても最初の{...}を抜く（簡易）。
+    """
+    t = text
+    start = t.find("{")
+    end = t.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return t[start : end + 1]
+    return text
+
+
+def _ensure_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    UIが壊れない最低限のキーを補完。
+    """
+    payload.setdefault("summary_1min", "")
+    payload.setdefault("headline", {})
+    payload["headline"].setdefault("tone", "不明")
+    payload["headline"].setdefault("score_0_10", 0)
+
+    payload.setdefault("performance", {})
+    payload["performance"].setdefault("period", "")
+    for k in ["sales_yoy_pct", "op_yoy_pct", "ordinary_yoy_pct", "net_yoy_pct"]:
+        payload["performance"].setdefault(k, None)
+
+    payload.setdefault("guidance", {})
+    for k in ["raised", "lowered", "unchanged", "sales_full_year", "op_full_year", "eps_full_year"]:
+        payload["guidance"].setdefault(k, None)
+
+    payload.setdefault("drivers", {})
+    payload["drivers"].setdefault("profit_up_reasons", [])
+    payload["drivers"].setdefault("profit_down_reasons", [])
+
+    payload.setdefault("risks", {})
+    payload["risks"].setdefault("short_term", [])
+    payload["risks"].setdefault("mid_term", [])
+
+    payload.setdefault("watch_points", [])
+    return payload
+
+
 def analyze_pdf_to_json(pdf_url: str) -> dict:
     """
-    決算短信PDFを解析して可視化向けJSONを返す。
+    決算短信PDFを解析して可視化向けJSONを返す（制限強め）。
     """
     client = _client()
     pdf_path = None
@@ -90,20 +212,22 @@ JSONスキーマ（厳守）:
         )
 
         text = (resp.text or "").strip()
+        text = _strip_code_fences(text)
+        text = _extract_first_json_object(text)
 
-        # よくある事故：```json ... ``` を吐く場合があるので剥がす
-        if text.startswith("```"):
-            text = text.strip("`")
-            # 先頭のjson等を雑に除去
-            text = text.replace("json", "", 1).strip()
+        # 1回目パース
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            # 復旧：JSON部分だけをもう少し強引に抽出し直す
+            cleaned = _extract_first_json_object(text)
+            cleaned = _strip_code_fences(cleaned)
+            payload = json.loads(cleaned)
 
-        payload = json.loads(text)
-
-        # 最低限の形チェック（壊れづらくする）
         if not isinstance(payload, dict):
             raise ValueError("AI output is not a JSON object")
 
-        return payload
+        return _ensure_schema(payload)
 
     finally:
         if pdf_path and os.path.exists(pdf_path):
