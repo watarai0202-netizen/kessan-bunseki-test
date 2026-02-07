@@ -8,41 +8,68 @@ import requests
 TDNET_BASE = "https://webapi.yanoshin.jp/webapi/tdnet/list"
 
 
-def _parse_dt_maybe(value: str | None) -> datetime | None:
+def _parse_dt_maybe(value: str | None) -> Optional[datetime]:
     if not value:
         return None
-    s = value.strip().replace("Z", "+00:00")
-    # よくある "2025-02-07 12:34:56" 形式も拾う
-    for fmt in (None, "%Y-%m-%d %H:%M:%S"):
-        try:
-            if fmt:
-                dt = datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
-            else:
-                dt = datetime.fromisoformat(s)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
-        except Exception:
-            continue
-    return None
+    s = str(value).strip().replace("Z", "+00:00")
+
+    # まずISO
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+
+    # 次に "YYYY-MM-DD HH:MM:SS"
+    try:
+        dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
 
 
 def _pick_first(*vals: Any) -> str:
     for v in vals:
         if v is None:
             continue
-        if isinstance(v, str) and v.strip():
-            return v.strip()
+        if isinstance(v, str):
+            vv = v.strip()
+            if vv:
+                return vv
+        else:
+            # 数字なども拾う
+            try:
+                vv = str(v).strip()
+                if vv:
+                    return vv
+            except Exception:
+                pass
     return ""
 
 
+def _unwrap_tdnet(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    APIレスポンスの包みが揺れるので、TDnet相当のdictを確実に取り出す。
+    例: {"Tdnet": {...}} / {"TDnet": {...}} / {"tdnet": {...}} / そのまま {...}
+    """
+    for k in ("TDnet", "Tdnet", "tdnet"):
+        v = raw.get(k)
+        if isinstance(v, dict):
+            return v
+    return raw
+
+
 def _normalize_item(raw: Dict[str, Any]) -> Dict[str, Any]:
-    td = raw.get("TDnet") if isinstance(raw.get("TDnet"), dict) else raw
+    td = _unwrap_tdnet(raw)
 
     title = _pick_first(td.get("title"), td.get("Title"), td.get("subject"), td.get("Subject"))
-    code = _pick_first(td.get("code"), td.get("Code"), td.get("ticker"), td.get("Ticker"))
 
-    # URLキーが揺れるのを最大限拾う（PDF優先）
+    # 銘柄コード：company_code (5桁) が来るケースあり → とりあえず文字列で保持
+    code = _pick_first(td.get("code"), td.get("Code"), td.get("company_code"), td.get("ticker"))
+
+    # PDF URL：document_url が確実っぽい（スクショ）
     doc_url = _pick_first(
         td.get("document_url"),
         td.get("documentUrl"),
@@ -54,13 +81,13 @@ def _normalize_item(raw: Dict[str, Any]) -> Dict[str, Any]:
         td.get("attachmentUrl"),
     )
 
-    # 「url」「link」がHTMLの詳細ページを指すことが多いので別で保持
-    link = _pick_first(td.get("link"), td.get("Link"), td.get("url"), td.get("detail_url"), td.get("detailUrl"))
+    # 詳細リンク（無いこともある）
+    link = _pick_first(td.get("url"), td.get("link"), td.get("detail_url"), td.get("detailUrl"))
 
     published_raw = _pick_first(
         td.get("published_at"),
         td.get("publishedAt"),
-        td.get("pubdate"),
+        td.get("pubdate"),          # ←スクショでこれ
         td.get("date"),
         td.get("datetime"),
     )
@@ -69,15 +96,15 @@ def _normalize_item(raw: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "title": title,
         "code": code,
-        "doc_url": doc_url,   # PDF直リンクが取れたら入る
-        "link": link,         # 取れない場合の保険
+        "doc_url": doc_url,
+        "link": link,
         "published_at": published_at,
         "raw": td,
     }
 
 
 def fetch_tdnet_items(code: str | None, limit: int = 200) -> List[Dict[str, Any]]:
-    if code and code.isdigit() and len(code) == 4:
+    if code and code.isdigit() and len(code) in (4, 5):
         url = f"{TDNET_BASE}/{code}.json?limit={limit}"
     else:
         url = f"{TDNET_BASE}/recent.json?limit={limit}"
@@ -86,8 +113,8 @@ def fetch_tdnet_items(code: str | None, limit: int = 200) -> List[Dict[str, Any]
     r.raise_for_status()
     data = r.json()
 
-    # items 以外の形も拾う（壊れにくさ）
-    items = None
+    # items以外の形も拾う
+    items: Any = None
     if isinstance(data, dict):
         items = data.get("items") or data.get("data") or data.get("result")
     elif isinstance(data, list):
