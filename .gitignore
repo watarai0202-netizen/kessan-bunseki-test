@@ -1,0 +1,12 @@
+# streamlit secrets
+.streamlit/secrets.toml
+
+# python
+__pycache__/
+*.pyc
+
+# local db
+app.db
+
+# temp files
+*.pdf
