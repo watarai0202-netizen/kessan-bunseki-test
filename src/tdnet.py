@@ -6,10 +6,9 @@ from typing import Any
 import requests
 
 # 非スクレイピングのJSONインデックス（やのしん TDnet WEB-API）
-# 必要なら環境変数で差し替え可能にする
 TDNET_BASE = "https://webapi.yanoshin.jp/webapi/tdnet/list"
 
-# TDnetの時刻はJST表記で来るケースが多いので、naiveな場合はJST扱いに寄せる
+# TDnetの時刻が "2026-02-06 20:00:00" のようなJSTっぽいnaiveで来ることがあるので補正
 JST = timezone(timedelta(hours=9))
 
 
@@ -17,12 +16,11 @@ def _parse_dt_maybe(value: str | None) -> datetime | None:
     if not value:
         return None
     s = str(value).strip()
-    # よくあるISO形式のZ
     s = s.replace("Z", "+00:00")
     try:
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
-            # "2026-02-06 20:00:00" みたいなnaiveはJST扱い → UTCへ
+            # naiveはJST扱い → UTCへ
             dt = dt.replace(tzinfo=JST)
         return dt.astimezone(timezone.utc)
     except Exception:
@@ -38,11 +36,11 @@ def _normalize_item(raw: dict[str, Any]) -> dict[str, Any]:
     title = td.get("title") or td.get("Title") or ""
     code = td.get("code") or td.get("Code") or ""
 
-    # 追加：会社コード/社名（yanoshinのJSONは company_code / company_name が多い）
+    # 会社コード/社名（yanoshin側のキーに合わせる）
     company_code = td.get("company_code") or td.get("companyCode") or code or ""
     company_name = td.get("company_name") or td.get("companyName") or ""
 
-    # 追加：4桁コード（45230→5230 のように末尾4桁を採用）
+    # 4桁コードを作る（45230→5230 みたいに末尾4桁）
     code4 = ""
     cc = str(company_code or "").strip()
     if cc.isdigit():
@@ -91,7 +89,6 @@ def fetch_tdnet_items(code: str | None, limit: int = 200) -> list[dict[str, Any]
 
     items = data.get("items")
     if not isinstance(items, list):
-        # 万一形が違ったら空で返す（壊れにくさ優先）
         return []
 
     out: list[dict[str, Any]] = []
