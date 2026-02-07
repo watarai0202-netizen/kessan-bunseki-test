@@ -1,5 +1,6 @@
-import os
+import hashlib
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import streamlit as st
 
@@ -39,10 +40,40 @@ DB_PATH = st.secrets.get("DB_PATH", db_path_default())
 init_db(DB_PATH)
 
 # ----------------------------
+# Security: strict URL allowlist (TDnet official only)
+# ----------------------------
+# ※「手動URL」は特に危険になりやすいので、公式系のみ許可
+ALLOWED_HOST_SUFFIXES = (
+    "release.tdnet.info",
+)
+
+def is_allowed_pdf_url(url: str) -> bool:
+    try:
+        u = urlparse(url)
+        if u.scheme not in ("http", "https"):
+            return False
+        host = (u.hostname or "").lower()
+        if not host:
+            return False
+        # allow subdomains too (e.g., xxx.release.tdnet.info)
+        if not any(host == s or host.endswith("." + s) for s in ALLOWED_HOST_SUFFIXES):
+            return False
+        # 強め：拡張子もチェック（完全ではないが事故を減らす）
+        if not u.path.lower().endswith(".pdf"):
+            return False
+        return True
+    except Exception:
+        return False
+
+def short_key(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]
+
+# ----------------------------
 # Header
 # ----------------------------
 st.title("📈 決算短信スクリーニング & ビジュアライズ")
 st.caption("狙い：スマホでも「銘柄→決算→要点＋数値」まで最短で見る。AI要約は押した時だけ実行。")
+st.caption("※セキュリティ強め：手動URLはTDnet公式（release.tdnet.info のPDF）だけ許可。PDFサイズ上限あり。")
 
 # ----------------------------
 # Screening controls
@@ -103,7 +134,6 @@ if show_ai_button and not ai_ok:
 # ----------------------------
 # Render list
 # ----------------------------
-# スマホ前提：1件ずつexpanderで開く UI
 for it in filtered[:100]:
     title = it.get("title", "")
     code_ = it.get("code", "")
@@ -122,13 +152,20 @@ for it in filtered[:100]:
         else:
             st.info("未解析")
 
+        k = short_key(doc_url or label)
+
         cols = st.columns([1, 1, 2])
         with cols[0]:
-            if st.button("キャッシュ表示", key=f"show_{doc_url}") and cached:
+            if st.button("キャッシュ表示", key=f"show_{k}") and cached:
                 render_analysis(cached)
+
         with cols[1]:
-            can_run_ai = show_ai_button and ai_ok and bool(doc_url)
-            run = st.button("AI分析", key=f"ai_{doc_url}", disabled=not can_run_ai)
+            can_run_ai = show_ai_button and ai_ok and bool(doc_url) and is_allowed_pdf_url(doc_url)
+            run = st.button("AI分析", key=f"ai_{k}", disabled=not can_run_ai)
+
+            if show_ai_button and ai_ok and doc_url and (not is_allowed_pdf_url(doc_url)):
+                st.caption("AI分析はTDnet公式PDF（release.tdnet.info の .pdf）だけ許可しています。")
+
         with cols[2]:
             st.caption("※同じPDF URLはSQLiteに保存し、再解析しません（DBはキャッシュ扱い）。")
 
@@ -144,14 +181,20 @@ for it in filtered[:100]:
 
 st.divider()
 
-# Manual analyze
-st.subheader("手動解析（PDF URLを貼る）")
-manual = st.text_input("PDF URL（.pdf推奨）", value="").strip()
+# ----------------------------
+# Manual analyze (STRICT)
+# ----------------------------
+st.subheader("手動解析（TDnet公式PDFのみ）")
+manual = st.text_input("PDF URL（release.tdnet.info かつ .pdf のみ）", value="").strip()
+
 colA, colB = st.columns([1, 3])
 with colA:
-    manual_run = st.button("AI解析", disabled=not (ai_ok and manual))
+    manual_ok = ai_ok and bool(manual) and is_allowed_pdf_url(manual)
+    manual_run = st.button("AI解析", disabled=not manual_ok)
+
 with colB:
-    st.caption("※PDF以外のURLだと失敗します（HTMLなど）。")
+    if manual and not is_allowed_pdf_url(manual):
+        st.warning("手動解析は TDnet公式（release.tdnet.info）かつ .pdf のURLのみ許可しています。")
 
 if manual_run:
     with st.spinner("AIが解析中..."):
