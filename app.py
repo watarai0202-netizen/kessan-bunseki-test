@@ -5,7 +5,6 @@ import hashlib
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
@@ -13,16 +12,12 @@ from urllib.parse import parse_qs, urlparse
 import requests
 import streamlit as st
 
-from src.tdnet import fetch_tdnet_items
+from src.tdnet import fetch_tdnet_items  # ← ここがポイント（tdnet_apiではなくtdnet）
 
 
-# -----------------------------
-# 設定・定数
-# -----------------------------
 APP_TITLE = "決算短信スクリーニング＆ビジュアライズ"
 DB_PATH = "app.db"
 
-# 決算フィルタ（緩め）
 _KESSAN_RE = re.compile(r"(決算短信|四半期決算|通期決算|Financial Results|Earnings)", re.IGNORECASE)
 
 
@@ -34,9 +29,6 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# -----------------------------
-# Secrets
-# -----------------------------
 def get_secret(key: str, default: str = "") -> str:
     try:
         return str(st.secrets.get(key, default))
@@ -49,9 +41,6 @@ GEMINI_API_KEY = get_secret("GEMINI_API_KEY", "")
 MAX_PDF_BYTES = int(get_secret("MAX_PDF_BYTES", "20000000") or "20000000")  # default 20MB
 
 
-# -----------------------------
-# DB（SQLite）
-# -----------------------------
 @st.cache_resource
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -92,9 +81,6 @@ def db_set(pdf_url: str, result_text: str, model: str = "") -> None:
     conn.commit()
 
 
-# -----------------------------
-# URL安全性（release.tdnet.info のみ許可）
-# -----------------------------
 def is_allowed_tdnet_pdf_url(url: str) -> bool:
     if not url:
         return False
@@ -102,21 +88,16 @@ def is_allowed_tdnet_pdf_url(url: str) -> bool:
         u = urlparse(url)
         host = (u.hostname or "").lower()
 
-        # 直接 release.tdnet.info
         if host.endswith("release.tdnet.info"):
             return True
 
-        # webapi.yanoshin.jp/rd.php?https://www.release.tdnet.info/...
         if host.endswith("webapi.yanoshin.jp") and u.path.endswith("/rd.php"):
             qs = parse_qs(u.query)
-            # rd.php?{TARGET_URL} 形式もあるので query 全体から拾う
-            # まず "url" や "u" があれば優先
             for k in ("url", "u", "target"):
                 if k in qs and qs[k]:
                     t = qs[k][0]
                     th = (urlparse(t).hostname or "").lower()
                     return th.endswith("release.tdnet.info")
-            # それ以外は query をそのままURL扱いしてチェック
             q = u.query
             if q.startswith("http"):
                 th = (urlparse(q).hostname or "").lower()
@@ -127,9 +108,6 @@ def is_allowed_tdnet_pdf_url(url: str) -> bool:
         return False
 
 
-# -----------------------------
-# PDF取得
-# -----------------------------
 def fetch_pdf_bytes(pdf_url: str) -> bytes:
     if not is_allowed_tdnet_pdf_url(pdf_url):
         raise ValueError("許可されていないPDF URLです（release.tdnet.info のみ許可）")
@@ -137,7 +115,6 @@ def fetch_pdf_bytes(pdf_url: str) -> bytes:
     r = requests.get(pdf_url, timeout=30, headers={"User-Agent": "Mozilla/5.0"}, stream=True)
     r.raise_for_status()
 
-    # サイズ上限
     chunks = []
     total = 0
     for chunk in r.iter_content(chunk_size=1024 * 128):
@@ -150,15 +127,10 @@ def fetch_pdf_bytes(pdf_url: str) -> bytes:
     return b"".join(chunks)
 
 
-# -----------------------------
-# Gemini API（PDFをそのまま投げる）
-# -----------------------------
 def gemini_analyze_pdf(pdf_bytes: bytes, prompt: str) -> str:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY が未設定です")
 
-    # Generative Language API (v1beta)
-    # 例: gemini-1.5-flash を使う（必要なら変えてOK）
     model = "gemini-1.5-flash"
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
 
@@ -174,26 +146,19 @@ def gemini_analyze_pdf(pdf_bytes: bytes, prompt: str) -> str:
                 ],
             }
         ],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": 2048,
-        },
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048},
     }
 
     resp = requests.post(endpoint, json=payload, timeout=60)
     resp.raise_for_status()
     data = resp.json()
 
-    # 安全に取り出す
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception:
         return json.dumps(data, ensure_ascii=False, indent=2)
 
 
-# -----------------------------
-# 表示用ユーティリティ
-# -----------------------------
 def fmt_dt(dt: Any) -> str:
     if not dt:
         return "----"
@@ -208,7 +173,6 @@ def build_code_label(it: dict[str, Any]) -> str:
     company_name = (it.get("company_name") or "").strip()
 
     base = code4 or company_code or "----"
-    # 4桁と5桁が両方あるなら "8170(68170)" 形式
     if company_code and company_code != base:
         base = f"{base}({company_code})"
     if company_name:
@@ -225,9 +189,6 @@ def make_uid(i: int, it: dict[str, Any]) -> str:
     return hashlib.md5(seed.encode("utf-8")).hexdigest()[:12]
 
 
-# -----------------------------
-# 認証（簡易）
-# -----------------------------
 def ensure_login() -> bool:
     if not APP_PASSWORD:
         st.warning("APP_PASSWORD が未設定です（Secretsに設定してください）")
@@ -246,12 +207,8 @@ def ensure_login() -> bool:
     return False
 
 
-# -----------------------------
-# UI
-# -----------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
-
 st.caption("狙い：スマホでも「銘柄→開示→要点＋数値」まで最短で見る。AI要約は押した時だけ実行。")
 st.caption(f"PDF上限: {MAX_PDF_BYTES/1_000_000:.1f}MB（超えると解析失敗しやすい）")
 
@@ -278,7 +235,6 @@ can_run_ai = bool(GEMINI_API_KEY) and show_ai_btn
 if show_ai_btn and not GEMINI_API_KEY:
     st.warning("GEMINI_API_KEY が未設定なのでAI分析は無効です（StreamlitのSecretsに入れてください）")
 
-# データ取得
 try:
     items = fetch_tdnet_items(code_input.strip() if code_input else None, limit=int(limit))
 except Exception as e:
@@ -289,7 +245,6 @@ if debug_show:
     st.write("DEBUG: items先頭5件（title/doc_url/published/company_nameの確認）")
     st.json(items[:5])
 
-# 期間フィルタ
 cutoff = utcnow() - timedelta(days=int(days))
 filtered = []
 for it in items:
@@ -297,21 +252,16 @@ for it in items:
     if isinstance(published, datetime):
         if published < cutoff:
             continue
-    # publishedがNoneでも一旦通す（APIの揺れ対策）
     filtered.append(it)
 
-# PDFフィルタ
 if only_pdf:
     filtered = [it for it in filtered if (it.get("doc_url") or "").strip()]
 
-# 決算フィルタ（0件なら自動で広げる）
 if only_kessan:
     k = [it for it in filtered if is_kessan(it.get("title", ""))]
-    if len(k) == 0:
-        # 自動で広げる（フィルタOFF相当）
-        pass
-    else:
+    if len(k) != 0:
         filtered = k
+    # 0件なら自動で広げる（何もしない）
 
 st.subheader(f"候補：{len(filtered)}件")
 
@@ -319,7 +269,6 @@ if len(filtered) == 0:
     st.info("条件に一致する開示が見つかりませんでした。日数/件数/フィルタを調整してください。")
     st.stop()
 
-# 表示（多すぎると重いので最大100件程度まで）
 max_show = min(100, len(filtered))
 for i, it in enumerate(filtered[:max_show]):
     uid = make_uid(i, it)
@@ -333,13 +282,11 @@ for i, it in enumerate(filtered[:max_show]):
     header = f"{header_left} | {title}"
 
     with st.expander(header, expanded=False):
-        # URL
         if doc_url:
             st.markdown(f"PDF: {doc_url}")
         else:
             st.caption("URL情報なし（AI解析不可）")
 
-        # 状態表示（キャッシュ）
         cached = db_get(doc_url) if doc_url else None
         if cached:
             st.success("解析済み（キャッシュあり）")
@@ -348,7 +295,6 @@ for i, it in enumerate(filtered[:max_show]):
 
         cols = st.columns([1, 1, 3])
 
-        # キャッシュ表示
         with cols[0]:
             if st.button("キャッシュ表示", key=f"show_{uid}", disabled=not bool(doc_url)):
                 c = db_get(doc_url) if doc_url else None
@@ -358,7 +304,6 @@ for i, it in enumerate(filtered[:max_show]):
                     st.caption(f"cached_at: {c['created_at']}  model: {c.get('model','')}")
                     st.text_area("cache", c["result_text"], height=240)
 
-        # AI分析
         with cols[1]:
             run = st.button(
                 "AI分析",
@@ -366,19 +311,16 @@ for i, it in enumerate(filtered[:max_show]):
                 disabled=(not can_run_ai) or (not bool(doc_url)),
             )
 
-        # 結果表示
         with cols[2]:
             if cached:
                 st.text_area("結果", cached["result_text"], height=240, key=f"res_{uid}", disabled=True)
 
         if run:
-            # 二重実行防止：まずキャッシュ確認
             if not doc_url:
                 st.error("PDF URLが無いので解析できません")
             elif not is_allowed_tdnet_pdf_url(doc_url):
                 st.error("許可されていないPDF URLです（release.tdnet.info のみ許可）")
             else:
-                # 既にキャッシュがあればそれを出す
                 c = db_get(doc_url)
                 if c:
                     st.success("キャッシュがあるので再解析しません")
